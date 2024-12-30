@@ -7,7 +7,7 @@ import requests
 from openpyxl.reader.excel import load_workbook
 
 from urllib import parse
-from scrapy import Request, Spider
+from scrapy import Request, Spider, Selector
 from scrapy.exceptions import CloseSpider
 
 
@@ -20,7 +20,7 @@ class TaxSpider(Spider):
     custom_settings = {
         'RETRY_TIMES': 5,
         'RETRY_HTTP_CODES': [500, 502, 503, 504, 400, 403, 404, 408],
-        'CONCURRENT_REQUESTS': 3,
+        # 'CONCURRENT_REQUESTS': 3,
     }
 
     def __init__(self):
@@ -55,8 +55,9 @@ class TaxSpider(Spider):
     }
 
     def start_requests(self):
-        self.write_logs(f"Total Records found in the file determination_database are :{len(self.read_determination_database)}")
+        self.write_logs(f"\nTotal Records found in the Excel file determination_database are :{len(self.read_determination_database)}\n")
         for record in self.read_determination_database:
+
             try:
                 publication_ref = record.get('Publication Ref', '').strip()
 
@@ -80,6 +81,7 @@ class TaxSpider(Spider):
                     url = ''.join(url.split('taxappeals.ie/')[1:])
                     url = f'https://www.taxappeals.ie/{url}'
 
+                url = url[:-1] if url.endswith('-') else url
                 yield Request(url, callback=self.parse_detail_page, dont_filter=True,
                               headers=self.headers, meta={'record':record})
 
@@ -92,6 +94,16 @@ class TaxSpider(Spider):
     def parse(self, response, **kwargs):
         determinations_urls = response.css('.blogSummary a::attr(href)').getall() or []
         for url in determinations_urls:
+            try:
+                pub_name = ''.join(''.join(url.split('/')[-1:]).split('-')[:1]).upper()
+                if pub_name in self.previous_scraped_records:
+                    print(f'Publication Ref {pub_name} Already Scraped so Skipped...')
+                    self.product_count += 1
+                    print('Items Scrapped:', self.product_count)
+                    continue
+            except:
+                a=1
+
             url = f'https://www.taxappeals.ie{url}'
             yield Request(url, callback=self.parse_detail_page, headers=self.headers)
 
@@ -101,15 +113,20 @@ class TaxSpider(Spider):
                 yield Request(url, callback=self.parse, headers=self.headers, meta={'pagination':True})
 
     def parse_detail_page(self, response):
+        record = response.meta.get('record', '')
+        if not record:  # if record empty then it mean response from 2024 year web base request
+            record = self.get_record_dict(response)
+
         if 'encountered an unexpected URL' in response.text:
-            self.write_logs(f"Records Not Exist at detail page URL:{response.url}")
-            return
+            url = response.url.replace('/-', '/')
+            req = requests.get(url)
+            if req.status_code==200:
+                response = Selector(text=req.text)
+            else:
+                self.write_logs(f"Records Not Exist at detail page URL:{response.url}")
+                return
 
         try:
-            record = response.meta.get('record', '')
-            if not record: # if record empty then it mean response from 2024 year web base request
-                record = self.get_record_dict(response)
-
             pdf_urls = response.css('#contentDiv a::attr(href)').getall() or []
 
             for pdf_url in pdf_urls:
@@ -120,7 +137,7 @@ class TaxSpider(Spider):
                     # Download the PDF and get the file name
                     pdf_filename = self.download_pdf_content(pdf_url)
 
-                pdf_filename = pdf_filename if pdf_filename else f"{record.get('Publication Ref', '')}.pdf"
+                pdf_filename = pdf_filename if pdf_filename else f"{record.get('Publication Ref', '')}.PDF"
                 save_json = self.write_json(record, pdf_filename)
 
                 self.product_count += 1
@@ -171,7 +188,7 @@ class TaxSpider(Spider):
             folder_path = 'tax_appeals'
             file_name = url.split("/")[-1]
             file_name = parse.unquote(file_name)
-            file_name = file_name.replace("Determination", "").strip()
+            file_name = file_name.replace("Determination", "").replace('-', '').strip()
             file_name = file_name.replace("(1)", "").strip().upper()
 
             # Define the full file path
@@ -196,10 +213,10 @@ class TaxSpider(Spider):
                 print(f"PDF successfully downloaded and saved as: {file_name}")
                 return file_name
             else:
-                print(f"Failed to download PDF. HTTP Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+                self.write_logs(f"Failed to download PDF. HTTP Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
                 return ''
         except Exception as e:
-            print(f"An error occurred while downloading the PDF: {e}")
+            self.write_logs(f"An error occurred while downloading the PDF: {e}")
             return ''
 
     def write_json(self, record, pdf_file):
@@ -257,20 +274,32 @@ class TaxSpider(Spider):
         tax_heads_mapping = {
             'VAT':'VAT',
             'Capital Gains Tax': 'CGT',
+            'Capital Gains Tax & Income Tax': 'CGT & IT',
             'CGT': 'CGT',
             'Corporation Tax': 'CT',
+            'Customs and Excise': 'CE',
+            'Customs & Excise' : 'CE',
+            'Corporation Tax & Income Tax': 'CT & IT',
+            'CT, DWT & PREM': 'CT & DWT & PREM',
             'Deposit Interest Retention Tax': 'DIRT',
             'Employment and Investment Incentive': 'EII',
+            'CGT, Income Tax': 'CGT & IT',
             'Income Tax': 'IT',
+            'Income Tax & VAT' : 'IT & VAT',
+            'Income Tax & RCT' : 'IT & RCT',
+            'Income Tax & USC': 'IT & USC',
             'Income Tax & Capital Gains Tax': 'IT & CGT',
+            'Income Tax & CAT': 'IT & CAT',
             'Income Tax - PSWT': 'IT & PSWT',
             'Income Tax and USC': 'IT & USC',
             'Income Tax & CGT': 'IT & CGT',
             'Income Tax (Rental or Trading Income)': 'IT (R or T)',
             'Income Tax (Help to Buy)': 'IT (Help to Buy)',
+            'Income Tax & LPT': 'IT & LPT',
             'Income Tax – Undeclared Income – CAB': 'IT - UI - CAB',
             'CGT & Income Tax': 'CGT & IT',
             'Local Property Tax': 'LPT',
+            'LPT': 'LPT',
             'Pay As You Earn': 'PAYE',
             'Relevant Contracts Tax': 'RCT',
             'Special Assignee Relief Programme': 'SARP',
@@ -278,6 +307,7 @@ class TaxSpider(Spider):
             'Temporary Wage Subsidy Scheme': 'TWSS',
             'Universal Social Charge': 'USC',
             'Value Added Tax': 'VAT',
+            'Vacant Homes Tax': 'VHT',
             'VAT & Customs and Excise': 'VAT & CE',
             'Vehicle Registration Tax': 'VRT',
             'Vehicle Registration Tax & Value Added Tax': 'VRT & VAT',
@@ -285,14 +315,18 @@ class TaxSpider(Spider):
             'Employment Investment Incentive': 'EII',
             'PAYE, PRSI & USC': 'PAYE, PRSI & USC',
             'Capital Acquisitions Tax': 'CAT',
+            'Help to Buy Scheme': 'HB Scheme',
             'Artists Exemption': 'AE',
+            "Artists' Exemption" : 'AE',
             'EWSS': 'EWSS',
             'Artist Exemption': 'AE',
             'VRT': 'VRT',
             'Covid Relief - EWSS': 'CR & EWSS',
             'CRSS': 'CRSS',
             'PREM': 'PREM',
-            'CAT': 'CAT'
+            'CAT': 'CAT',
+            'RCT': 'RCT',
+            'SPCCC': 'SPCCC'
         }
 
         try:
